@@ -242,6 +242,41 @@ final class CaretIndicator {
   }
 }
 
+/// 辞書の入力中に語数を出し、上限を超えた行を赤くして保存できなくする
+final class KeytermsValidator: NSObject, NSTextViewDelegate {
+  let label = NSTextField(labelWithString: "")
+  weak var saveButton: NSButton?
+
+  func textDidChange(_ notification: Notification) {
+    guard let textView = notification.object as? NSTextView else { return }
+    update(textView)
+  }
+
+  func update(_ textView: NSTextView) {
+    guard let storage = textView.textStorage else { return }
+    let text = storage.string as NSString
+    let all = NSRange(location: 0, length: text.length)
+    storage.addAttribute(.foregroundColor, value: NSColor.textColor, range: all)
+    var count = 0
+    var tooLong = 0
+    text.enumerateSubstrings(in: all, options: .byLines) { line, range, _, _ in
+      let term = line?.trimmingCharacters(in: .whitespaces) ?? ""
+      guard !term.isEmpty else { return }
+      count += 1
+      if term.count > maxKeytermLength { tooLong += 1 }
+      if term.count > maxKeytermLength || count > maxKeyterms {
+        storage.addAttribute(.foregroundColor, value: NSColor.systemRed, range: range)
+      }
+    }
+    var problems: [String] = []
+    if count > maxKeyterms { problems.append("\(count - maxKeyterms)語多い") }
+    if tooLong > 0 { problems.append("\(tooLong)語が\(maxKeytermLength)文字を超えている") }
+    label.stringValue = (["\(count) / \(maxKeyterms)語"] + problems).joined(separator: "  ")
+    label.textColor = problems.isEmpty ? .secondaryLabelColor : .systemRed
+    saveButton?.isEnabled = problems.isEmpty
+  }
+}
+
 final class App: NSObject, NSApplicationDelegate {
   let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
   let audioURL = FileManager.default.temporaryDirectory.appendingPathComponent("koe.m4a")
@@ -404,42 +439,38 @@ final class App: NSObject, NSApplicationDelegate {
 
   @objc func editKeyterms() {
     let scroll = NSTextView.scrollableTextView()
-    scroll.frame = NSRect(x: 0, y: 0, width: 300, height: 200)
+    scroll.frame = NSRect(x: 0, y: 24, width: 300, height: 200)
     let textView = scroll.documentView as! NSTextView
     textView.font = .systemFont(ofSize: 13)
     textView.string = readConfig("keyterms.txt") ?? ""
 
+    let validator = KeytermsValidator()
+    validator.label.frame = NSRect(x: 0, y: 0, width: 300, height: 18)
+    let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 224))
+    accessory.addSubview(scroll)
+    accessory.addSubview(validator.label)
+
     let alert = NSAlert()
     alert.messageText = "辞書"
     alert.informativeText = "認識させたい言葉を1行に1つ（\(maxKeyterms)語まで、1語\(maxKeytermLength)文字まで）"
-    alert.accessoryView = scroll
+    alert.accessoryView = accessory
     alert.addButton(withTitle: "保存")
     alert.addButton(withTitle: "キャンセル")
     alert.window.initialFirstResponder = textView
+    validator.saveButton = alert.buttons.first
+    textView.delegate = validator
+    validator.update(textView)
     NSApp.activate(ignoringOtherApps: true)
 
-    while alert.runModal() == .alertFirstButtonReturn {
-      let terms = parseKeyterms(textView.string)
-      let tooLong = terms.filter { $0.count > maxKeytermLength }
-      let problem =
-        terms.count > maxKeyterms
-        ? "\(terms.count)語あります。\(maxKeyterms)語までにしてください"
-        : tooLong.isEmpty ? nil : "\(maxKeytermLength)文字を超えています: \(tooLong.joined(separator: ", "))"
-      if let problem {
-        let warning = NSAlert()
-        warning.messageText = "保存できません"
-        warning.informativeText = problem
-        warning.runModal()
-        continue
-      }
-      do {
-        try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-        try (terms.joined(separator: "\n") + "\n").write(
-          to: configDir.appendingPathComponent("keyterms.txt"), atomically: true, encoding: .utf8)
-      } catch {
-        fail("辞書を保存できません: \(error.localizedDescription)")
-      }
-      return
+    // textView.delegate は weak なので、モーダルの間 validator を生かしておく
+    let response = withExtendedLifetime(validator) { alert.runModal() }
+    guard response == .alertFirstButtonReturn else { return }
+    do {
+      try FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+      try (parseKeyterms(textView.string).joined(separator: "\n") + "\n").write(
+        to: configDir.appendingPathComponent("keyterms.txt"), atomically: true, encoding: .utf8)
+    } catch {
+      fail("辞書を保存できません: \(error.localizedDescription)")
     }
   }
 
