@@ -22,20 +22,15 @@ fn キーを押している間だけ録音し、離すと文字起こしして�
 
 ## セットアップ
 
-1. xAI の API キーを置く
-
-   ```bash
-   mkdir -p ~/.config/koe && echo "xai-..." > ~/.config/koe/api_key
-   ```
-
-2. ビルドする（`~/Applications/Koe.app` ができる）。`--restart` をつけると、動いている Koe を終了してからビルドし、ビルド後に起動する
+1. ビルドする（`~/Applications/Koe.app` ができる）。`--restart` をつけると、動いている Koe を終了してからビルドし、ビルド後に起動する
 
    ```bash
    ./build.sh --restart
    ```
 
-3. `Koe.app` を起動し、マイクとアクセシビリティを許可する
+2. `Koe.app` を起動し、マイクとアクセシビリティを許可する
    - アクセシビリティは貼り付け（⌘V の送信）に必要
+3. メニューの「API キーを設定…」から xAI の API キーを入れる（キーチェーンに保存される）
 
 `build.sh` はキーチェーンにある最初の `Apple Development` 証明書で署名する。別の証明書を使うときは `KOE_SIGN_IDENTITY` で指定する
 
@@ -51,7 +46,6 @@ KOE_SIGN_IDENTITY="Apple Development: Your Name (XXXXXXXXXX)" ./build.sh
 
 | ファイル | 内容 |
 | --- | --- |
-| `api_key` | xAI の API キー（必須） |
 | `keyterms.txt` | 認識させたい固有名詞などを1行に1つ（任意）。100語まで、1語50文字まで（xAI の上限）。メニューの「辞書を編集…」からも編集できる |
 
 ## 制限

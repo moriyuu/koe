@@ -11,6 +11,28 @@ func readConfig(_ name: String) -> String? {
   return s.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+let apiKeyQuery: [String: Any] = [
+  kSecClass as String: kSecClassGenericPassword,
+  kSecAttrService as String: "me.moriyuu.koe",
+  kSecAttrAccount as String: "api_key",
+]
+
+func readAPIKey() -> String? {
+  var query = apiKeyQuery
+  query[kSecReturnData as String] = true
+  var item: CFTypeRef?
+  guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data
+  else { return nil }
+  return String(decoding: data, as: UTF8.self)
+}
+
+func saveAPIKey(_ key: String) -> OSStatus {
+  SecItemDelete(apiKeyQuery as CFDictionary)
+  var item = apiKeyQuery
+  item[kSecValueData as String] = Data(key.utf8)
+  return SecItemAdd(item as CFDictionary, nil)
+}
+
 // xAI STT の上限
 let maxKeyterms = 100
 let maxKeytermLength = 50
@@ -232,6 +254,7 @@ final class App: NSObject, NSApplicationDelegate {
     let menu = NSMenu()
     menu.addItem(NSMenuItem(title: "録音 開始/停止", action: #selector(toggle), keyEquivalent: ""))
     menu.addItem(NSMenuItem(title: "辞書を編集…", action: #selector(editKeyterms), keyEquivalent: ""))
+    menu.addItem(NSMenuItem(title: "API キーを設定…", action: #selector(editAPIKey), keyEquivalent: ""))
     menu.addItem(NSMenuItem(title: "設定フォルダを開く", action: #selector(openConfig), keyEquivalent: ""))
     menu.items.forEach { $0.target = self }
     menu.addItem(.separator())
@@ -304,8 +327,8 @@ final class App: NSObject, NSApplicationDelegate {
   }
 
   func transcribe() {
-    guard let key = readConfig("api_key"), !key.isEmpty else {
-      fail("~/.config/koe/api_key がありません")
+    guard let key = readAPIKey(), !key.isEmpty else {
+      fail("API キーが未設定です（メニューの「API キーを設定…」）")
       return
     }
     guard let audio = try? Data(contentsOf: audioURL) else {
@@ -418,6 +441,24 @@ final class App: NSObject, NSApplicationDelegate {
       }
       return
     }
+  }
+
+  @objc func editAPIKey() {
+    let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+    field.placeholderString = readAPIKey() == nil ? "xai-..." : "設定済み（変えるときだけ入力）"
+    let alert = NSAlert()
+    alert.messageText = "xAI の API キー"
+    alert.informativeText = "キーチェーンに保存します"
+    alert.accessoryView = field
+    alert.addButton(withTitle: "保存")
+    alert.addButton(withTitle: "キャンセル")
+    alert.window.initialFirstResponder = field
+    NSApp.activate(ignoringOtherApps: true)
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let input = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !input.isEmpty else { return }
+    let status = saveAPIKey(input)
+    if status != errSecSuccess { fail("API キーを保存できません: \(status)") }
   }
 
   @objc func openConfig() {
