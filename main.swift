@@ -100,11 +100,21 @@ func playSound(_ name: String) {
   sound.play()
 }
 
-// ponytail: 出力先が使われているかで判定するので、一時停止中も出力を開いたままのアプリでは誤判定する
+// 再生中かは Apple 署名のプロセスからしか読めないので osascript 経由で MediaRemote に問い合わせる
 func isPlayingAudio() -> Bool {
-  let system = AudioObjectID(kAudioObjectSystemObject)
-  guard let output = audioValue(system, kAudioHardwarePropertyDefaultOutputDevice) else { return false }
-  return audioValue(output, kAudioDevicePropertyDeviceIsRunningSomewhere) == 1
+  let p = Process()
+  p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+  p.arguments = [
+    "-l", "JavaScript", "-e",
+    "$.NSBundle.bundleWithPath('/System/Library/PrivateFrameworks/MediaRemote.framework/').load;"
+      + "$.NSClassFromString('MRNowPlayingRequest').localIsPlaying",
+  ]
+  let pipe = Pipe()
+  p.standardOutput = pipe
+  p.standardError = FileHandle.nullDevice
+  guard (try? p.run()) != nil else { return false }
+  p.waitUntilExit()
+  return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.hasPrefix("true") == true
 }
 
 let mediaKeyPlay = 16
