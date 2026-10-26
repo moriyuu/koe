@@ -68,7 +68,7 @@ func audioValue(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) ->
   return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr ? value : nil
 }
 
-func builtInSpeaker() -> (id: AudioDeviceID, uid: String)? {
+func builtInDevice(_ scope: AudioObjectPropertyScope) -> (id: AudioDeviceID, uid: String)? {
   let system = AudioObjectID(kAudioObjectSystemObject)
   var addr = audioAddress(kAudioHardwarePropertyDevices)
   var size: UInt32 = 0
@@ -76,7 +76,7 @@ func builtInSpeaker() -> (id: AudioDeviceID, uid: String)? {
   var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
   guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return nil }
   for id in ids where audioValue(id, kAudioDevicePropertyTransportType) == kAudioDeviceTransportTypeBuiltIn {
-    var streams = audioAddress(kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput)
+    var streams = audioAddress(kAudioDevicePropertyStreams, scope)
     var streamsSize: UInt32 = 0
     var uidAddr = audioAddress(kAudioDevicePropertyDeviceUID)
     var uid: Unmanaged<CFString>?
@@ -93,11 +93,37 @@ func builtInSpeaker() -> (id: AudioDeviceID, uid: String)? {
 func playSound(_ name: String) {
   NSSound(named: name)?.play()
   let defaultOutput = audioValue(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice)
-  guard let speaker = builtInSpeaker(), speaker.id != defaultOutput,
+  guard let speaker = builtInDevice(kAudioObjectPropertyScopeOutput), speaker.id != defaultOutput,
     let sound = NSSound(named: name)?.copy() as? NSSound
   else { return }
   sound.playbackDeviceIdentifier = speaker.uid
   sound.play()
+}
+
+// ponytail: 出力先が使われているかで判定するので、一時停止中も出力を開いたままのアプリでは誤判定する
+func isPlayingAudio() -> Bool {
+  let system = AudioObjectID(kAudioObjectSystemObject)
+  guard let output = audioValue(system, kAudioHardwarePropertyDefaultOutputDevice) else { return false }
+  return audioValue(output, kAudioDevicePropertyDeviceIsRunningSomewhere) == 1
+}
+
+let mediaKeyPlay = 16
+
+func pressPlayPause() {
+  for down in [true, false] {
+    let state = down ? 0xa : 0xb
+    let e = NSEvent.otherEvent(
+      with: .systemDefined, location: .zero, modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(state << 8)),
+      timestamp: 0, windowNumber: 0, context: nil, subtype: 8, data1: mediaKeyPlay << 16 | state << 8, data2: -1)
+    e?.cgEvent?.post(tap: .cghidEventTap)
+  }
+}
+
+func usesBluetoothInput() -> Bool {
+  guard let input = audioValue(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultInputDevice)
+  else { return false }
+  let transport = audioValue(input, kAudioDevicePropertyTransportType)
+  return transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
 }
 
 func caretRect() -> NSRect? {
@@ -325,8 +351,9 @@ final class KeytermsValidator: NSObject, NSTextViewDelegate {
 final class App: NSObject, NSApplicationDelegate {
   let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
   let audioURL = FileManager.default.temporaryDirectory.appendingPathComponent("koe.m4a")
-  var recorder: AVAudioRecorder?
+  var recording: (engine: AVAudioEngine, file: AVAudioFile)?
   var startedAt = Date()
+  var pausedMusic = false
   let indicator = CaretIndicator()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -367,19 +394,39 @@ final class App: NSObject, NSApplicationDelegate {
   }
 
   @objc func toggle() {
-    recorder == nil ? start() : stop()
+    recording == nil ? start() : stop()
   }
 
   func start() {
-    guard recorder == nil else { return }
+    guard recording == nil else { return }
+    pausedMusic = isPlayingAudio()
+    if pausedMusic { pressPlayPause() }
+    let engine = AVAudioEngine()
+    let input = engine.inputNode
+    // AirPods のマイクを使うと AirPods が通話用モードに切り替わり、音楽の音質や音量が変わるので内蔵マイクで録る
+    if usesBluetoothInput(), var mic = builtInDevice(kAudioObjectPropertyScopeInput)?.id, let unit = input.audioUnit {
+      AudioUnitSetProperty(
+        unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &mic,
+        UInt32(MemoryLayout<AudioDeviceID>.size))
+    }
+    let format = input.inputFormat(forBus: 0)
     let settings: [String: Any] = [
-      AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 16000, AVNumberOfChannelsKey: 1,
+      AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: format.sampleRate,
+      AVNumberOfChannelsKey: format.channelCount,
     ]
-    guard let r = try? AVAudioRecorder(url: audioURL, settings: settings), r.record() else {
+    guard format.sampleRate > 0, let file = try? AVAudioFile(forWriting: audioURL, settings: settings) else {
+      resumeMusic()
       fail("録音を開始できません（マイクの許可を確認）")
       return
     }
-    recorder = r
+    input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in try? file.write(from: buffer) }
+    guard (try? engine.start()) != nil else {
+      input.removeTap(onBus: 0)
+      resumeMusic()
+      fail("録音を開始できません（マイクの許可を確認）")
+      return
+    }
+    recording = (engine, file)
     playSound("Morse")
     startedAt = Date()
     setIcon("mic.fill")
@@ -387,25 +434,38 @@ final class App: NSObject, NSApplicationDelegate {
   }
 
   func stop() {
-    guard let r = recorder else { return }
+    guard let r = recording else { return }
     // fn を軽く押しただけのときは API を呼ばない
     if Date().timeIntervalSince(startedAt) < 0.3 { return cancel() }
-    recorder = nil
+    recording = nil
     setIcon("ellipsis")
     indicator.showTranscribing()
     // 離すのと同時に話し終えると語尾が切れるので少し録り足す
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-      r.stop()
+      self.finish(r)
       playSound("Frog")
       self.transcribe()
     }
   }
 
   func cancel() {
-    recorder?.stop()
-    recorder = nil
+    if let recording { finish(recording) }
+    recording = nil
     setIcon("mic")
     indicator.hide()
+  }
+
+  func finish(_ r: (engine: AVAudioEngine, file: AVAudioFile)) {
+    r.engine.inputNode.removeTap(onBus: 0)
+    r.engine.stop()
+    r.file.close()
+    resumeMusic()
+  }
+
+  func resumeMusic() {
+    guard pausedMusic else { return }
+    pausedMusic = false
+    pressPlayPause()
   }
 
   func transcribe() {
