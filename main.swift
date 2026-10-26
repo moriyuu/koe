@@ -55,6 +55,51 @@ func debugLog(_ message: String) {
   }
 }
 
+func audioAddress(
+  _ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+) -> AudioObjectPropertyAddress {
+  AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+}
+
+func audioValue(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> UInt32? {
+  var addr = audioAddress(selector)
+  var value: UInt32 = 0
+  var size = UInt32(MemoryLayout<UInt32>.size)
+  return AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr ? value : nil
+}
+
+func builtInSpeaker() -> (id: AudioDeviceID, uid: String)? {
+  let system = AudioObjectID(kAudioObjectSystemObject)
+  var addr = audioAddress(kAudioHardwarePropertyDevices)
+  var size: UInt32 = 0
+  guard AudioObjectGetPropertyDataSize(system, &addr, 0, nil, &size) == noErr else { return nil }
+  var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+  guard AudioObjectGetPropertyData(system, &addr, 0, nil, &size, &ids) == noErr else { return nil }
+  for id in ids where audioValue(id, kAudioDevicePropertyTransportType) == kAudioDeviceTransportTypeBuiltIn {
+    var streams = audioAddress(kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput)
+    var streamsSize: UInt32 = 0
+    var uidAddr = audioAddress(kAudioDevicePropertyDeviceUID)
+    var uid: Unmanaged<CFString>?
+    var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyDataSize(id, &streams, 0, nil, &streamsSize) == noErr, streamsSize > 0,
+      AudioObjectGetPropertyData(id, &uidAddr, 0, nil, &uidSize, &uid) == noErr, let uid
+    else { continue }
+    return (id, uid.takeRetainedValue() as String)
+  }
+  return nil
+}
+
+// AirPods などで聞いていても、周りに音声入力中だと伝わるよう内蔵スピーカーからも鳴らす
+func playSound(_ name: String) {
+  NSSound(named: name)?.play()
+  let defaultOutput = audioValue(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice)
+  guard let speaker = builtInSpeaker(), speaker.id != defaultOutput,
+    let sound = NSSound(named: name)?.copy() as? NSSound
+  else { return }
+  sound.playbackDeviceIdentifier = speaker.uid
+  sound.play()
+}
+
 func caretRect() -> NSRect? {
   guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
   let appElement = AXUIElementCreateApplication(app.processIdentifier)
@@ -335,7 +380,7 @@ final class App: NSObject, NSApplicationDelegate {
       return
     }
     recorder = r
-    NSSound(named: "Morse")?.play()
+    playSound("Morse")
     startedAt = Date()
     setIcon("mic.fill")
     indicator.showRecording()
@@ -351,7 +396,7 @@ final class App: NSObject, NSApplicationDelegate {
     // 離すのと同時に話し終えると語尾が切れるので少し録り足す
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
       r.stop()
-      NSSound(named: "Frog")?.play()
+      playSound("Frog")
       self.transcribe()
     }
   }
