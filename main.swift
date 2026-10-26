@@ -335,6 +335,7 @@ final class App: NSObject, NSApplicationDelegate {
       return
     }
     recorder = r
+    NSSound(named: "Morse")?.play()
     startedAt = Date()
     setIcon("mic.fill")
     indicator.showRecording()
@@ -350,6 +351,7 @@ final class App: NSObject, NSApplicationDelegate {
     // 離すのと同時に話し終えると語尾が切れるので少し録り足す
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
       r.stop()
+      NSSound(named: "Frog")?.play()
       self.transcribe()
     }
   }
