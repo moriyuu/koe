@@ -362,6 +362,7 @@ final class App: NSObject, NSApplicationDelegate {
   let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
   let audioURL = FileManager.default.temporaryDirectory.appendingPathComponent("koe.m4a")
   var recording: (engine: AVAudioEngine, file: AVAudioFile)?
+  var starting: UUID?
   var startedAt = Date()
   var pausedMusic = false
   let indicator = CaretIndicator()
@@ -408,9 +409,41 @@ final class App: NSObject, NSApplicationDelegate {
   }
 
   func start() {
-    guard recording == nil else { return }
+    guard recording == nil, starting == nil else { return }
     pausedMusic = isPlayingAudio()
     if pausedMusic { pressPlayPause() }
+    let attempt = UUID()
+    starting = attempt
+    // 入力デバイスの切り替え中は inputNode が戻ってこないことがあるので、メインスレッドの外で開始して待ち時間に上限を設ける
+    DispatchQueue.global(qos: .userInitiated).async {
+      let started = self.startEngine()
+      DispatchQueue.main.async {
+        guard self.starting == attempt else {
+          if let started { self.discard(started) }
+          return
+        }
+        self.starting = nil
+        guard let started else {
+          self.resumeMusic()
+          self.fail("録音を開始できません（マイクの許可を確認）")
+          return
+        }
+        self.recording = started
+        playSound("Morse")
+        self.startedAt = Date()
+        self.setIcon("mic.fill")
+        self.indicator.showRecording()
+      }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+      guard self.starting == attempt else { return }
+      self.starting = nil
+      self.resumeMusic()
+      self.fail("マイクが応答しません（入力デバイスの切り替え中かも）")
+    }
+  }
+
+  func startEngine() -> (engine: AVAudioEngine, file: AVAudioFile)? {
     let engine = AVAudioEngine()
     let input = engine.inputNode
     // AirPods のマイクを使うと AirPods が通話用モードに切り替わり、音楽の音質や音量が変わるので内蔵マイクで録る
@@ -425,25 +458,19 @@ final class App: NSObject, NSApplicationDelegate {
       AVNumberOfChannelsKey: format.channelCount,
     ]
     guard format.sampleRate > 0, let file = try? AVAudioFile(forWriting: audioURL, settings: settings) else {
-      resumeMusic()
-      fail("録音を開始できません（マイクの許可を確認）")
-      return
+      return nil
     }
     input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in try? file.write(from: buffer) }
     guard (try? engine.start()) != nil else {
       input.removeTap(onBus: 0)
-      resumeMusic()
-      fail("録音を開始できません（マイクの許可を確認）")
-      return
+      return nil
     }
-    recording = (engine, file)
-    playSound("Morse")
-    startedAt = Date()
-    setIcon("mic.fill")
-    indicator.showRecording()
+    return (engine, file)
   }
 
   func stop() {
+    // 録音が始まる前に fn を離したときは開始を取りやめる
+    if starting != nil { return cancel() }
     guard let r = recording else { return }
     // fn を軽く押しただけのときは API を呼ばない
     if Date().timeIntervalSince(startedAt) < 0.3 { return cancel() }
@@ -459,6 +486,10 @@ final class App: NSObject, NSApplicationDelegate {
   }
 
   func cancel() {
+    if starting != nil {
+      starting = nil
+      resumeMusic()
+    }
     if let recording { finish(recording) }
     recording = nil
     setIcon("mic")
@@ -466,10 +497,14 @@ final class App: NSObject, NSApplicationDelegate {
   }
 
   func finish(_ r: (engine: AVAudioEngine, file: AVAudioFile)) {
+    discard(r)
+    resumeMusic()
+  }
+
+  func discard(_ r: (engine: AVAudioEngine, file: AVAudioFile)) {
     r.engine.inputNode.removeTap(onBus: 0)
     r.engine.stop()
     r.file.close()
-    resumeMusic()
   }
 
   func resumeMusic() {
